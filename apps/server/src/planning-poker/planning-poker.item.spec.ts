@@ -22,9 +22,9 @@ describe('planning-poker item-complete flow', () => {
   it('6.1 早停：Round 1 取得 success_avg 後項目完結且不得再進入 Round 2', async () => {
     const hostId = 'host-1';
     const p1Id = 'p1-1';
-    const code = svc.createRoom(hostId, 'Host', 5);
+    const code = svc.createRoom(hostId, 'Host', hostId, 5);
 
-    svc.joinRoom(p1Id, code, 'P1');
+    svc.joinRoom(p1Id, code, 'P1', p1Id);
     svc.hostStartVoting(hostId, code);
 
     // success_avg: Round1 numeric votes all in the same triplet {0,1,2}
@@ -53,8 +53,8 @@ describe('planning-poker item-complete flow', () => {
   it('6.2 三輪皆無 success_avg：最後在 Round 3 完成後項目完結', async () => {
     const hostId = 'host-2';
     const p1Id = 'p1-2';
-    const code = svc.createRoom(hostId, 'Host', 5);
-    svc.joinRoom(p1Id, code, 'P1');
+    const code = svc.createRoom(hostId, 'Host', hostId, 5);
+    svc.joinRoom(p1Id, code, 'P1', p1Id);
 
     // Round 1 failure_high_low (not a single triplet)
     svc.hostStartVoting(hostId, code);
@@ -103,8 +103,8 @@ describe('planning-poker item-complete flow', () => {
   it('6.5 ? 不算得分：Round 1 含 ? 不得早停，仍可走到下一輪並在 Round 3 完結', async () => {
     const hostId = 'host-3';
     const p1Id = 'p1-3';
-    const code = svc.createRoom(hostId, 'Host', 5);
-    svc.joinRoom(p1Id, code, 'P1');
+    const code = svc.createRoom(hostId, 'Host', hostId, 5);
+    svc.joinRoom(p1Id, code, 'P1', p1Id);
 
     // Round 1 with '?': cannot_estimate => not success_avg => should remain revealed
     svc.hostStartVoting(hostId, code);

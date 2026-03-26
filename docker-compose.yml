@@ -1,0 +1,25 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    environment:
+      - PORT=9004
+      # 不寫死 localhost：讓後端在未指定 WEB_ORIGIN 時採動態 Origin（見 apps/server/src/main.ts）
+      # 若你要更嚴格，可改成：http://<你的主機IP或網域>:9003
+      - WEB_ORIGIN=
+    ports:
+      - "9004:9004"
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      # 不在 build-time 內嵌 localhost，避免其他電腦連線時 WS 連錯主機
+      args: {}
+    environment: {}
+    ports:
+      - "9003:9003"
+    depends_on:
+      - server
+

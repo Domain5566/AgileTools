@@ -11,7 +11,9 @@ export type RoomPhase =
 export type ParticipantRole = 'host' | 'participant';
 
 export interface Participant {
-  socketId: string;
+  clientId: string;
+  /** 目前 Socket 連線；斷線時為 null */
+  socketId: string | null;
   name: string;
   role: ParticipantRole;
   /** 本輪是否可投票（晚加入：所有人已投完、尚未亮牌前加入 → 本輪不可投） */
@@ -32,11 +34,13 @@ export interface RoomSnapshot {
   revealedVotes: Record<string, CardString> | null;
   summary: RoomSummaryPayload | null;
   participants: Array<{
-    id: string;
+    /** 穩定客戶端身分，等同 `clientId` */
+    clientId: string;
     name: string;
     role: ParticipantRole;
     canVoteThisRound: boolean;
     hasVoted: boolean;
+    connected: boolean;
   }>;
 }
 

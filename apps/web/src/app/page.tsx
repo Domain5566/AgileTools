@@ -5,6 +5,10 @@ import { io, type Socket } from "socket.io-client";
 
 const CARDS = ["0", "1", "2", "3", "5", "8", "13", "21", "?"] as const;
 
+const PP_CLIENT_ID = "pp:clientId";
+const PP_ROOM_CODE = "pp:roomCode";
+const PP_LAST_NAME = "pp:lastDisplayName";
+
 type RoomSnapshot = {
   roomCode: string;
   phase: string;
@@ -24,17 +28,81 @@ type RoomSnapshot = {
     round3Remaining?: number[];
   } | null;
   participants: Array<{
-    id: string;
+    clientId: string;
     name: string;
     role: string;
     canVoteThisRound: boolean;
     hasVoted: boolean;
+    connected: boolean;
   }>;
 };
 
+function makeUuid(): string {
+  const c: Crypto | undefined = typeof crypto !== "undefined" ? crypto : undefined;
+  if (c?.randomUUID) return c.randomUUID();
+  if (c?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    c.getRandomValues(bytes);
+    // RFC 4122 v4
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0"));
+    return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex
+      .slice(6, 8)
+      .join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
+  }
+  // 最低保底：無 crypto 時仍需穩定字串（非密碼學安全）
+  return `fallback-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function clearRoomSession(): void {
+  try {
+    sessionStorage.removeItem(PP_ROOM_CODE);
+    sessionStorage.removeItem(PP_LAST_NAME);
+  } catch {
+    /* ignore */
+  }
+}
+
+function persistRoomSession(roomCode: string, displayName: string): void {
+  try {
+    sessionStorage.setItem(PP_ROOM_CODE, roomCode.trim().toUpperCase());
+    sessionStorage.setItem(PP_LAST_NAME, displayName);
+  } catch {
+    /* ignore */
+  }
+}
+
+function getWsOrigin(): string {
+  const fromEnv = process.env.NEXT_PUBLIC_WS_ORIGIN;
+  if (typeof window === "undefined") return "http://localhost:9004";
+  const proto = window.location.protocol === "https:" ? "https:" : "http:";
+  const host = window.location.hostname;
+  const derived = `${proto}//${host}:9004`;
+
+  if (fromEnv && fromEnv.trim()) {
+    const trimmed = fromEnv.trim();
+    // 若前端不是從 localhost 開啟，卻配置成連 localhost（常見於 docker build-time 內嵌），
+    // 會導致其他電腦連線時 WS 連到自己。此時以「同一 hostname」推導為準。
+    if (host !== "localhost" && host !== "127.0.0.1" && host !== "::1") {
+      try {
+        const u = new URL(trimmed);
+        const isLocal =
+          u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "::1";
+        if (isLocal) return derived;
+      } catch {
+        // ignore parse errors and fall back to trimmed
+      }
+    }
+    return trimmed;
+  }
+
+  return derived;
+}
+
 export default function Home() {
+  const [clientId, setClientId] = useState<string | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
-  const [mySocketId, setMySocketId] = useState<string | null>(null);
   const [roomCode, setRoomCode] = useState("");
   const [hostName, setHostName] = useState("");
   const [joinCode, setJoinCode] = useState("");
@@ -44,43 +112,104 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const origin =
-      process.env.NEXT_PUBLIC_WS_ORIGIN ?? "http://localhost:4000";
+    let id = sessionStorage.getItem(PP_CLIENT_ID);
+    if (!id) {
+      id = makeUuid();
+      sessionStorage.setItem(PP_CLIENT_ID, id);
+    }
+    setClientId(id);
+    const savedName = sessionStorage.getItem(PP_LAST_NAME);
+    if (savedName) {
+      setHostName((n) => n || savedName);
+      setJoinName((n) => n || savedName);
+    }
+    const savedCode = sessionStorage.getItem(PP_ROOM_CODE);
+    if (savedCode) setJoinCode(savedCode);
+  }, []);
+
+  useEffect(() => {
+    if (!clientId) return;
+    const origin = getWsOrigin();
     const s = io(`${origin}/planning-poker`, {
       transports: ["websocket"],
     });
     setSocket(s);
-    s.on("connect", () => setMySocketId(s.id ?? null));
+
+    const tryResume = () => {
+      let rc: string | null = null;
+      try {
+        rc = sessionStorage.getItem(PP_ROOM_CODE);
+      } catch {
+        rc = null;
+      }
+      if (!rc?.trim()) return;
+      let name = "Participant";
+      try {
+        name = sessionStorage.getItem(PP_LAST_NAME) || "Participant";
+      } catch {
+        /* ignore */
+      }
+      s.emit(
+        "pp:joinRoom",
+        {
+          clientId,
+          roomCode: rc.trim().toUpperCase(),
+          name,
+        },
+        (res: { ok?: boolean; error?: string }) => {
+          if (res?.ok === false && res?.error) {
+            clearRoomSession();
+            setError(res.error);
+            setState(null);
+            setRoomCode("");
+          }
+        },
+      );
+    };
+
+    s.on("connect", () => {
+      tryResume();
+    });
     s.on("pp:roomState", (payload: RoomSnapshot) => {
       setState(payload);
       setRoomCode(payload.roomCode);
+      setError(null);
     });
     s.on("pp:error", (payload: { message?: string }) => {
       setError(payload.message ?? "錯誤");
     });
+    s.on("pp:roomDissolved", () => {
+      clearRoomSession();
+      setState(null);
+      setRoomCode("");
+    });
     return () => {
       s.disconnect();
     };
-  }, []);
+  }, [clientId]);
 
   const clearError = useCallback(() => setError(null), []);
 
   const createRoom = () => {
     clearError();
-    if (!socket) return;
+    if (!socket || !clientId) return;
+    const display = hostName.trim() || "Host";
     socket.emit(
       "pp:createRoom",
-      { hostName: hostName || "Host", thinkSeconds },
+      { clientId, hostName: display, thinkSeconds },
       (res: { roomCode?: string; error?: string }) => {
         if (res?.error) setError(res.error);
-        if (res?.roomCode) setRoomCode(res.roomCode);
+        if (res?.roomCode) {
+          setRoomCode(res.roomCode);
+          persistRoomSession(res.roomCode, display);
+        }
       },
     );
   };
 
   const joinRoom = () => {
     clearError();
-    if (!socket?.connected) {
+    if (!socket?.connected || !clientId) {
       setError("尚未連線到伺服器，請稍候再試");
       return;
     }
@@ -89,11 +218,39 @@ export default function Home() {
       setError("請輸入房間代碼");
       return;
     }
+    const display = joinName.trim() || "Participant";
     socket.emit(
       "pp:joinRoom",
-      { roomCode: code, name: joinName || "Participant" },
+      { clientId, roomCode: code, name: display },
       (res: { ok?: boolean; error?: string }) => {
-        if (res?.ok === true) setError(null);
+        if (res?.ok === true) {
+          setError(null);
+          persistRoomSession(code, display);
+        }
+        if (res?.ok === false && res?.error) setError(res.error);
+      },
+    );
+  };
+
+  const leaveRoom = () => {
+    clearError();
+    if (!socket || !roomCode) return;
+    socket.emit(
+      "pp:leaveRoom",
+      { roomCode },
+      (res: { ok?: boolean; error?: string }) => {
+        if (res?.ok === false && res?.error) setError(res.error);
+      },
+    );
+  };
+
+  const dissolveRoom = () => {
+    clearError();
+    if (!socket || !roomCode) return;
+    socket.emit(
+      "pp:dissolveRoom",
+      { roomCode },
+      (res: { ok?: boolean; error?: string }) => {
         if (res?.ok === false && res?.error) setError(res.error);
       },
     );
@@ -123,8 +280,16 @@ export default function Home() {
     socket.emit("pp:vote", { roomCode, value }, () => undefined);
   };
 
-  const me = state?.participants.find((p) => p.id === mySocketId);
+  const me = state?.participants.find((p) => p.clientId === clientId);
   const isHost = me?.role === "host";
+
+  if (!clientId) {
+    return (
+      <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center bg-slate-950 px-4 py-6 text-slate-100">
+        <p className="text-center text-sm text-slate-400">初始化中…</p>
+      </main>
+    );
+  }
 
   return (
     <main className="mx-auto flex min-h-screen max-w-md flex-col gap-4 bg-slate-950 px-4 py-6 text-slate-100">
@@ -167,7 +332,8 @@ export default function Home() {
           <button
             type="button"
             onClick={createRoom}
-            className="w-full rounded-lg bg-indigo-600 py-2.5 text-sm font-medium text-white hover:bg-indigo-500"
+            disabled={!socket?.connected}
+            className="w-full rounded-lg bg-indigo-600 py-2.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
           >
             建立房間
           </button>
@@ -180,8 +346,11 @@ export default function Home() {
             <input
               className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm uppercase"
               value={joinCode}
-              onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+              onChange={(e) => setJoinCode(e.target.value)}
               placeholder="例如 ABC123"
+              autoCapitalize="characters"
+              autoCorrect="off"
+              spellCheck={false}
             />
           </label>
           <label className="block text-xs text-slate-400">
@@ -196,7 +365,8 @@ export default function Home() {
           <button
             type="button"
             onClick={joinRoom}
-            className="w-full rounded-lg border border-slate-600 py-2.5 text-sm font-medium text-slate-100 hover:bg-slate-800"
+            disabled={!socket?.connected}
+            className="w-full rounded-lg border border-slate-600 py-2.5 text-sm font-medium text-slate-100 hover:bg-slate-800 disabled:opacity-50"
           >
             加入
           </button>
@@ -217,6 +387,25 @@ export default function Home() {
               {state.phase.replaceAll("_", " ")}
             </span>
           </div>
+
+          {isHost && (
+            <button
+              type="button"
+              onClick={dissolveRoom}
+              className="w-full rounded-lg border border-rose-700/60 bg-rose-950/30 py-2 text-sm text-rose-100 hover:bg-rose-950/50"
+            >
+              解散房間
+            </button>
+          )}
+          {!isHost && (
+            <button
+              type="button"
+              onClick={leaveRoom}
+              className="w-full rounded-lg border border-slate-600 py-2 text-sm text-slate-200 hover:bg-slate-800"
+            >
+              離開房間
+            </button>
+          )}
 
           {state.phase === "lobby" && isHost && (
             <button
@@ -358,10 +547,13 @@ export default function Home() {
             <p className="mb-2 text-xs text-slate-500">成員</p>
             <ul className="space-y-1 text-sm text-slate-300">
               {state.participants.map((p) => (
-                <li key={p.id} className="flex justify-between gap-2">
+                <li key={p.clientId} className="flex justify-between gap-2">
                   <span>
                     {p.name}
                     {p.role === "host" ? "（Host）" : ""}
+                    <span className="ml-1 text-xs text-slate-500">
+                      {p.connected ? "線上" : "離線"}
+                    </span>
                   </span>
                   <span className="text-slate-500">
                     {p.hasVoted ? "已投" : "未投"}

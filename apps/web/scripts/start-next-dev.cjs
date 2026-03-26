@@ -15,7 +15,14 @@ function tryPrint() {
   const m = buf.match(/Local:\s+(https?:\/\/\S+)/);
   if (!m) return;
   printed.done = true;
-  const backendPort = Number(process.env.PORT || 4000);
+  let backendOrigin = process.env.NEXT_PUBLIC_WS_ORIGIN;
+  if (!backendOrigin) backendOrigin = 'http://localhost:9004';
+  let backendPort = 9004;
+  try {
+    backendPort = Number(new URL(backendOrigin).port || 9004);
+  } catch {
+    backendPort = 9004;
+  }
   console.log('');
   console.log('══════════════════════════════════════════════════');
   console.log('  開發環境：前後端埠號');
@@ -33,7 +40,7 @@ function feed(chunk) {
   tryPrint();
 }
 
-const child = spawn('npx', ['next', 'dev', '-p', '3000'], {
+const child = spawn('npx', ['next', 'dev', '-p', '9003'], {
   cwd: root,
   shell: true,
   env: process.env,

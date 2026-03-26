@@ -12,17 +12,24 @@ import { PlanningPokerService } from './planning-poker.service';
 import {
   ClientEvents,
   type CreateRoomPayload,
+  type DissolveRoomPayload,
   type HostRoomPayload,
   type JoinRoomPayload,
+  type LeaveRoomPayload,
   ServerEvents,
   type VotePayload,
 } from './ws-events';
 
-const webOrigin = process.env.WEB_ORIGIN ?? 'http://localhost:3000';
+const webOrigin = process.env.WEB_ORIGIN;
+
+function requireClientId(body: { clientId?: string }): string | null {
+  const id = typeof body.clientId === 'string' ? body.clientId.trim() : '';
+  return id.length > 0 ? id : null;
+}
 
 @WebSocketGateway({
   namespace: '/planning-poker',
-  cors: { origin: webOrigin, credentials: true },
+  cors: { origin: webOrigin?.trim() ? webOrigin.trim() : true, credentials: true },
 })
 export class PlanningPokerGateway implements OnModuleInit, OnGatewayDisconnect {
   @WebSocketServer()
@@ -35,16 +42,17 @@ export class PlanningPokerGateway implements OnModuleInit, OnGatewayDisconnect {
   }
 
   handleDisconnect(client: Socket): void {
-    const code = this.poker.removeParticipant(client.id);
+    const code = this.poker.handleSocketDisconnect(client.id);
     if (code) this.broadcast(code);
   }
 
   private broadcast(code: string): void {
     const room = this.poker.getRoom(code);
     if (!room) return;
-    for (const socketId of room.participants.keys()) {
-      const snapshot = this.poker.snapshotFor(room, socketId);
-      this.server.to(socketId).emit(ServerEvents.roomState, snapshot);
+    for (const p of room.participants.values()) {
+      if (!p.socketId) continue;
+      const snapshot = this.poker.snapshotFor(room, p.clientId);
+      this.server.to(p.socketId).emit(ServerEvents.roomState, snapshot);
     }
   }
 
@@ -53,8 +61,11 @@ export class PlanningPokerGateway implements OnModuleInit, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() body: CreateRoomPayload,
   ): { roomCode: string } | { error: string } {
-    const code = this.poker.createRoom(client.id, body.hostName, body.thinkSeconds);
+    const clientId = requireClientId(body);
+    if (!clientId) return { error: '缺少 clientId' };
+    const code = this.poker.createRoom(clientId, body.hostName, client.id, body.thinkSeconds);
     client.data.ppRoomCode = code;
+    client.data.ppClientId = clientId;
     return { roomCode: code };
   }
 
@@ -63,12 +74,52 @@ export class PlanningPokerGateway implements OnModuleInit, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() body: JoinRoomPayload,
   ): { ok: true } | { ok: false; error: string } {
-    const res = this.poker.joinRoom(client.id, body.roomCode, body.name);
+    const clientId = requireClientId(body);
+    if (!clientId) {
+      client.emit(ServerEvents.error, { message: '缺少 clientId' });
+      return { ok: false, error: '缺少 clientId' };
+    }
+    const res = this.poker.joinRoom(client.id, body.roomCode, body.name, clientId);
     if (!res.ok) {
       client.emit(ServerEvents.error, { message: res.reason });
       return { ok: false, error: res.reason };
     }
     client.data.ppRoomCode = body.roomCode.trim().toUpperCase();
+    client.data.ppClientId = clientId;
+    return { ok: true };
+  }
+
+  @SubscribeMessage(ClientEvents.leaveRoom)
+  handleLeave(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: LeaveRoomPayload,
+  ): { ok: true } | { ok: false; error: string } {
+    const res = this.poker.leaveRoom(client.id, body.roomCode);
+    if (!res.ok) {
+      client.emit(ServerEvents.error, { message: res.reason });
+      return { ok: false, error: res.reason };
+    }
+    client.emit(ServerEvents.roomDissolved, { reason: 'left' });
+    delete client.data.ppRoomCode;
+    delete client.data.ppClientId;
+    return { ok: true };
+  }
+
+  @SubscribeMessage(ClientEvents.dissolveRoom)
+  handleDissolve(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: DissolveRoomPayload,
+  ): { ok: true } | { ok: false; error: string } {
+    const res = this.poker.dissolveRoom(client.id, body.roomCode);
+    if (!res.ok) {
+      client.emit(ServerEvents.error, { message: res.reason });
+      return { ok: false, error: res.reason };
+    }
+    for (const sid of res.notifiedSocketIds) {
+      this.server.to(sid).emit(ServerEvents.roomDissolved, { reason: 'dissolved' });
+    }
+    delete client.data.ppRoomCode;
+    delete client.data.ppClientId;
     return { ok: true };
   }
 
@@ -77,7 +128,12 @@ export class PlanningPokerGateway implements OnModuleInit, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() body: HostRoomPayload,
   ): { ok: true } | { ok: false; error: string } {
-    const res = this.poker.hostStartVoting(client.id, body.roomCode);
+    const resolved = this.poker.resolveClientInRoom(client.id, body.roomCode);
+    if ('error' in resolved) {
+      client.emit(ServerEvents.error, { message: resolved.error });
+      return { ok: false, error: resolved.error };
+    }
+    const res = this.poker.hostStartVoting(resolved.clientId, body.roomCode);
     if (!res.ok) {
       client.emit(ServerEvents.error, { message: res.reason });
       return { ok: false, error: res.reason };
@@ -90,7 +146,12 @@ export class PlanningPokerGateway implements OnModuleInit, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() body: HostRoomPayload,
   ): { ok: true } | { ok: false; error: string } {
-    const res = this.poker.hostNextRound(client.id, body.roomCode);
+    const resolved = this.poker.resolveClientInRoom(client.id, body.roomCode);
+    if ('error' in resolved) {
+      client.emit(ServerEvents.error, { message: resolved.error });
+      return { ok: false, error: resolved.error };
+    }
+    const res = this.poker.hostNextRound(resolved.clientId, body.roomCode);
     if (!res.ok) {
       client.emit(ServerEvents.error, { message: res.reason });
       return { ok: false, error: res.reason };
@@ -103,7 +164,12 @@ export class PlanningPokerGateway implements OnModuleInit, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() body: HostRoomPayload,
   ): { ok: true } | { ok: false; error: string } {
-    const res = this.poker.hostNextItem(client.id, body.roomCode);
+    const resolved = this.poker.resolveClientInRoom(client.id, body.roomCode);
+    if ('error' in resolved) {
+      client.emit(ServerEvents.error, { message: resolved.error });
+      return { ok: false, error: resolved.error };
+    }
+    const res = this.poker.hostNextItem(resolved.clientId, body.roomCode);
     if (!res.ok) {
       client.emit(ServerEvents.error, { message: res.reason });
       return { ok: false, error: res.reason };
@@ -116,7 +182,12 @@ export class PlanningPokerGateway implements OnModuleInit, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() body: VotePayload,
   ): { ok: true } | { ok: false; error: string } {
-    const res = this.poker.vote(client.id, body.roomCode, body.value);
+    const resolved = this.poker.resolveClientInRoom(client.id, body.roomCode);
+    if ('error' in resolved) {
+      client.emit(ServerEvents.error, { message: resolved.error });
+      return { ok: false, error: resolved.error };
+    }
+    const res = this.poker.vote(resolved.clientId, body.roomCode, body.value);
     if (!res.ok) {
       client.emit(ServerEvents.error, { message: res.reason });
       return { ok: false, error: res.reason };

@@ -5,11 +5,11 @@
 
 /** Client → Server */
 export const ClientEvents = {
-  /** 建立房間：{ hostName: string, thinkSeconds?: number }，thinkSeconds 最少 5 */
+  /** 建立房間：{ clientId, hostName, thinkSeconds? }，thinkSeconds 最少 5 */
   createRoom: 'pp:createRoom',
-  /** 加入：{ roomCode: string, name: string } */
+  /** 加入／重連：{ clientId, roomCode, name } */
   joinRoom: 'pp:joinRoom',
-  /** 投票：{ value: string }，須為允許卡面 */
+  /** 投票：{ roomCode, value }（身分由 socket 綁定解析） */
   vote: 'pp:vote',
   /** Host：開始第一輪或從 lobby 進入 Round 1 */
   hostStartVoting: 'pp:hostStartVoting',
@@ -17,6 +17,10 @@ export const ClientEvents = {
   hostNextRound: 'pp:hostNextRound',
   /** Host：待估項目完結後，開始下一次投分（重置輪次/票/計時/結果） */
   hostNextItem: 'pp:hostNextItem',
+  /** 參與者離開房間（Host 不可使用） */
+  leaveRoom: 'pp:leaveRoom',
+  /** Host 解散房間 */
+  dissolveRoom: 'pp:dissolveRoom',
 } as const;
 
 /** Server → Client */
@@ -25,14 +29,18 @@ export const ServerEvents = {
   roomState: 'pp:roomState',
   /** 錯誤訊息（單播） */
   error: 'pp:error',
+  /** 房間已解散（單播給原房內連線者） */
+  roomDissolved: 'pp:roomDissolved',
 } as const;
 
 export interface CreateRoomPayload {
+  clientId: string;
   hostName: string;
   thinkSeconds?: number;
 }
 
 export interface JoinRoomPayload {
+  clientId: string;
   roomCode: string;
   name: string;
 }
@@ -43,5 +51,13 @@ export interface VotePayload {
 }
 
 export interface HostRoomPayload {
+  roomCode: string;
+}
+
+export interface LeaveRoomPayload {
+  roomCode: string;
+}
+
+export interface DissolveRoomPayload {
   roomCode: string;
 }

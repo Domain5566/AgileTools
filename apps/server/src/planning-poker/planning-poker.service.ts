@@ -5,7 +5,7 @@ import type { Participant, RoomPhase, RoomSnapshot, RoomSummaryPayload } from '.
 
 interface InternalRoom {
   code: string;
-  hostSocketId: string;
+  hostClientId: string;
   phase: RoomPhase;
   round: 1 | 2 | 3;
   thinkSeconds: number;
@@ -23,6 +23,8 @@ interface InternalRoom {
 @Injectable()
 export class PlanningPokerService {
   private readonly rooms = new Map<string, InternalRoom>();
+  /** socketId → 房間與穩定 clientId */
+  private readonly socketBindings = new Map<string, { roomCode: string; clientId: string }>();
   private onRoomChange?: (code: string) => void;
 
   setOnRoomChange(cb: (code: string) => void): void {
@@ -37,14 +39,68 @@ export class PlanningPokerService {
     return randomBytes(4).toString('base64url').slice(0, 6).toUpperCase();
   }
 
-  createRoom(hostSocketId: string, hostName: string, thinkSeconds?: number): string {
+  private bindSocket(socketId: string, roomCode: string, clientId: string): void {
+    this.socketBindings.set(socketId, {
+      roomCode: roomCode.toUpperCase(),
+      clientId,
+    });
+  }
+
+  private unbindSocket(socketId: string): void {
+    this.socketBindings.delete(socketId);
+  }
+
+  /** 換新 socket 時解除舊連線綁定 */
+  private rebindParticipantSocket(room: InternalRoom, clientId: string, newSocketId: string): void {
+    const p = room.participants.get(clientId);
+    if (!p) return;
+    if (p.socketId && p.socketId !== newSocketId) {
+      this.unbindSocket(p.socketId);
+    }
+    p.socketId = newSocketId;
+    this.bindSocket(newSocketId, room.code, clientId);
+  }
+
+  resolveClientInRoom(
+    socketId: string,
+    rawRoomCode: string,
+  ): { clientId: string } | { error: string } {
+    const norm = rawRoomCode.trim().toUpperCase();
+    const b = this.socketBindings.get(socketId);
+    if (!b || b.roomCode !== norm) return { error: '未加入此房間或連線已失效' };
+    return { clientId: b.clientId };
+  }
+
+  /**
+   * 斷線：僅解除 socket 與參與者關聯，不刪成員、不刪房。
+   * @returns 若房間仍在則回傳 room code 以便廣播
+   */
+  handleSocketDisconnect(socketId: string): string | undefined {
+    const b = this.socketBindings.get(socketId);
+    if (!b) return undefined;
+    const room = this.getRoom(b.roomCode);
+    this.unbindSocket(socketId);
+    if (!room) return undefined;
+    const p = room.participants.get(b.clientId);
+    if (p) p.socketId = null;
+    this.touch(room);
+    return room.code;
+  }
+
+  createRoom(
+    hostClientId: string,
+    hostName: string,
+    hostSocketId: string,
+    thinkSeconds?: number,
+  ): string {
     const sec = Math.max(5, thinkSeconds ?? 60);
     let code = this.genRoomCode();
     while (this.rooms.has(code)) code = this.genRoomCode();
 
+    const trimmedHost = hostName.trim() || 'Host';
     const room: InternalRoom = {
       code,
-      hostSocketId,
+      hostClientId,
       phase: 'lobby',
       round: 1,
       thinkSeconds: sec,
@@ -52,10 +108,11 @@ export class PlanningPokerService {
       revealTick: null,
       participants: new Map([
         [
-          hostSocketId,
+          hostClientId,
           {
+            clientId: hostClientId,
             socketId: hostSocketId,
-            name: hostName.trim() || 'Host',
+            name: trimmedHost,
             role: 'host',
             canVoteThisRound: true,
           },
@@ -69,6 +126,7 @@ export class PlanningPokerService {
       revealedVotes: null,
     };
     this.rooms.set(code, room);
+    this.bindSocket(hostSocketId, code, hostClientId);
     this.touch(room);
     return code;
   }
@@ -77,24 +135,12 @@ export class PlanningPokerService {
     return this.rooms.get(code.toUpperCase());
   }
 
-  /** 回傳仍存在的房間代碼（Host 離開則刪房，回傳 undefined） */
-  removeParticipant(socketId: string): string | undefined {
-    for (const room of this.rooms.values()) {
-      if (!room.participants.has(socketId)) continue;
-      const code = room.code;
-      room.participants.delete(socketId);
-      room.votes.delete(socketId);
-      if (room.hostSocketId === socketId) {
-        this.disposeRoomTimers(room);
-        this.rooms.delete(room.code);
-        return undefined;
-      }
-      return code;
-    }
-    return undefined;
-  }
-
-  joinRoom(socketId: string, rawCode: string, name: string): { ok: true } | { ok: false; reason: string } {
+  joinRoom(
+    socketId: string,
+    rawCode: string,
+    name: string,
+    clientId: string,
+  ): { ok: true } | { ok: false; reason: string } {
     const code = rawCode.trim().toUpperCase();
     const room = this.rooms.get(code);
     if (!room) return { ok: false, reason: '找不到房間' };
@@ -106,21 +152,74 @@ export class PlanningPokerService {
       room.phase === 'revealed' ||
       room.phase === 'item_complete';
 
-    room.participants.set(socketId, {
+    const existing = room.participants.get(clientId);
+    if (existing) {
+      if (trimmed) existing.name = trimmed;
+      this.rebindParticipantSocket(room, clientId, socketId);
+      this.touch(room);
+      return { ok: true };
+    }
+
+    room.participants.set(clientId, {
+      clientId,
       socketId,
       name: trimmed,
       role: 'participant',
       canVoteThisRound: room.phase === 'voting' && !lateJoinNoVote,
     });
-
+    this.bindSocket(socketId, code, clientId);
     this.touch(room);
     return { ok: true };
   }
 
-  hostStartVoting(hostSocketId: string, code: string): { ok: true } | { ok: false; reason: string } {
+  leaveRoom(
+    socketId: string,
+    rawRoomCode: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    const r = this.resolveClientInRoom(socketId, rawRoomCode);
+    if ('error' in r) return { ok: false, reason: r.error };
+    const code = rawRoomCode.trim().toUpperCase();
     const room = this.getRoom(code);
     if (!room) return { ok: false, reason: '找不到房間' };
-    if (room.hostSocketId !== hostSocketId) return { ok: false, reason: '僅 Host 可開始投票' };
+    if (r.clientId === room.hostClientId) {
+      return { ok: false, reason: 'Host 請使用「解散房間」，無法僅離開' };
+    }
+    room.participants.delete(r.clientId);
+    room.votes.delete(r.clientId);
+    this.unbindSocket(socketId);
+    this.touch(room);
+    return { ok: true };
+  }
+
+  dissolveRoom(
+    socketId: string,
+    rawRoomCode: string,
+  ): { ok: true; notifiedSocketIds: string[] } | { ok: false; reason: string } {
+    const r = this.resolveClientInRoom(socketId, rawRoomCode);
+    if ('error' in r) return { ok: false, reason: r.error };
+    const code = rawRoomCode.trim().toUpperCase();
+    const room = this.getRoom(code);
+    if (!room) return { ok: false, reason: '找不到房間' };
+    if (r.clientId !== room.hostClientId) {
+      return { ok: false, reason: '僅 Host 可解散房間' };
+    }
+
+    const notifiedSocketIds = [...room.participants.values()]
+      .map((p) => p.socketId)
+      .filter((s): s is string => s != null);
+
+    for (const sid of notifiedSocketIds) {
+      this.unbindSocket(sid);
+    }
+    this.disposeRoomTimers(room);
+    this.rooms.delete(room.code);
+    return { ok: true, notifiedSocketIds };
+  }
+
+  hostStartVoting(clientId: string, code: string): { ok: true } | { ok: false; reason: string } {
+    const room = this.getRoom(code);
+    if (!room) return { ok: false, reason: '找不到房間' };
+    if (room.hostClientId !== clientId) return { ok: false, reason: '僅 Host 可開始投票' };
     if (room.phase !== 'lobby') return { ok: false, reason: '僅能在等待室開始首輪投票' };
 
     room.round = 1;
@@ -128,10 +227,10 @@ export class PlanningPokerService {
     return { ok: true };
   }
 
-  hostNextRound(hostSocketId: string, code: string): { ok: true } | { ok: false; reason: string } {
+  hostNextRound(clientId: string, code: string): { ok: true } | { ok: false; reason: string } {
     const room = this.getRoom(code);
     if (!room) return { ok: false, reason: '找不到房間' };
-    if (room.hostSocketId !== hostSocketId) return { ok: false, reason: '僅 Host 可推進輪次' };
+    if (room.hostClientId !== clientId) return { ok: false, reason: '僅 Host 可推進輪次' };
     if (room.phase !== 'revealed') return { ok: false, reason: '請先完成本輪揭示' };
     if (room.round >= 3) return { ok: false, reason: '已完成 Round 3' };
 
@@ -140,13 +239,12 @@ export class PlanningPokerService {
     return { ok: true };
   }
 
-  hostNextItem(hostSocketId: string, code: string): { ok: true } | { ok: false; reason: string } {
+  hostNextItem(clientId: string, code: string): { ok: true } | { ok: false; reason: string } {
     const room = this.getRoom(code);
     if (!room) return { ok: false, reason: '找不到房間' };
-    if (room.hostSocketId !== hostSocketId) return { ok: false, reason: '僅 Host 可開始下一次投分' };
+    if (room.hostClientId !== clientId) return { ok: false, reason: '僅 Host 可開始下一次投分' };
     if (room.phase !== 'item_complete') return { ok: false, reason: '目前無可開始下一次投分' };
 
-    // Reset: 重置為等待室，等待 Host 開始 Round 1
     this.disposeRoomTimers(room);
     room.phase = 'lobby';
     room.round = 1;
@@ -181,7 +279,7 @@ export class PlanningPokerService {
   }
 
   vote(
-    socketId: string,
+    clientId: string,
     code: string,
     value: string,
   ): { ok: true } | { ok: false; reason: string } {
@@ -189,14 +287,15 @@ export class PlanningPokerService {
     if (!room) return { ok: false, reason: '找不到房間' };
     if (room.phase !== 'voting') return { ok: false, reason: '目前非投票階段' };
 
-    const p = room.participants.get(socketId);
+    const p = room.participants.get(clientId);
     if (!p?.canVoteThisRound) return { ok: false, reason: '本輪無法投票（晚加入規則）' };
     if (!isAllowedCard(value)) return { ok: false, reason: '不合法的投票值' };
 
-    room.votes.set(socketId, value);
+    room.votes.set(clientId, value);
 
-    const eligible = this.eligibleVoterIds(room);
-    const allIn = eligible.length > 0 && eligible.every((id) => room.votes.has(id));
+    const connectedEligible = this.connectedRoundVoterClientIds(room);
+    const allIn =
+      connectedEligible.length > 0 && connectedEligible.every((id) => room.votes.has(id));
     if (allIn) {
       room.awaitingRevealKickoff = true;
       this.touch(room);
@@ -208,8 +307,19 @@ export class PlanningPokerService {
     return { ok: true };
   }
 
-  eligibleVoterIds(room: InternalRoom): string[] {
-    return [...room.participants.values()].filter((p) => p.canVoteThisRound).map((p) => p.socketId);
+  /** 本輪應投票者（含暫時離線者，用於揭示計算） */
+  private roundVoterClientIds(room: InternalRoom): string[] {
+    return [...room.participants.entries()]
+      .filter(([, p]) => p.canVoteThisRound)
+      .map(([cid]) => cid);
+  }
+
+  /** 本輪應投票且目前連線中者（用於「是否全體已投」） */
+  private connectedRoundVoterClientIds(room: InternalRoom): string[] {
+    return this.roundVoterClientIds(room).filter((cid) => {
+      const p = room.participants.get(cid);
+      return p?.socketId != null;
+    });
   }
 
   private startThinkTimer(room: InternalRoom): void {
@@ -217,8 +327,11 @@ export class PlanningPokerService {
     room.thinkInterval = setInterval(() => {
       if (room.phase !== 'voting' || room.thinkRemaining === null) return;
 
-      const eligible = this.eligibleVoterIds(room);
-      if (eligible.length > 0 && eligible.every((id) => room.votes.has(id))) {
+      const connectedEligible = this.connectedRoundVoterClientIds(room);
+      if (
+        connectedEligible.length > 0 &&
+        connectedEligible.every((id) => room.votes.has(id))
+      ) {
         return;
       }
 
@@ -234,8 +347,10 @@ export class PlanningPokerService {
 
   private kickoffRevealCountdown(room: InternalRoom): void {
     if (room.phase !== 'voting') return;
-    const eligible = this.eligibleVoterIds(room);
-    const allIn = eligible.length > 0 && eligible.every((id) => room.votes.has(id));
+    const connectedEligible = this.connectedRoundVoterClientIds(room);
+    const allIn =
+      connectedEligible.length > 0 &&
+      connectedEligible.every((id) => room.votes.has(id));
     if (!allIn) {
       room.awaitingRevealKickoff = false;
       this.touch(room);
@@ -266,7 +381,7 @@ export class PlanningPokerService {
   private finishReveal(room: InternalRoom): void {
     room.revealTick = null;
 
-    const eligible = this.eligibleVoterIds(room);
+    const eligible = this.roundVoterClientIds(room);
     const voteList = eligible.map((id) => room.votes.get(id) ?? '?');
 
     const names: Record<string, CardString> = {};
@@ -282,11 +397,9 @@ export class PlanningPokerService {
     const summary = this.computeSummary(round, voteList);
     room.summary = summary;
 
-    // 早停規則：Round 1/2 只要拿到「成功平均」就直接完結本項
     if (round < 3 && summary.outcome === 'success_avg') {
       room.phase = 'item_complete';
     } else if (round === 3) {
-      // Round 3 完成後，本項無論結果都完結
       room.phase = 'item_complete';
     } else {
       room.phase = 'revealed';
@@ -337,13 +450,14 @@ export class PlanningPokerService {
     room.revealTimeouts = [];
   }
 
-  snapshotFor(room: InternalRoom, viewerSocketId: string): RoomSnapshot {
+  snapshotFor(room: InternalRoom, viewerClientId: string): RoomSnapshot {
     const participants = [...room.participants.values()].map((p) => ({
-      id: p.socketId,
+      clientId: p.clientId,
       name: p.name,
       role: p.role,
       canVoteThisRound: p.canVoteThisRound,
-      hasVoted: room.votes.has(p.socketId),
+      hasVoted: room.votes.has(p.clientId),
+      connected: p.socketId != null,
     }));
 
     const showThink =
@@ -352,7 +466,7 @@ export class PlanningPokerService {
       room.thinkRemaining > 0 &&
       room.thinkRemaining <= 5;
 
-    const rawMine = room.votes.get(viewerSocketId);
+    const rawMine = room.votes.get(viewerClientId);
     const myVote =
       room.phase === 'voting' && rawMine && isAllowedCard(rawMine)
         ? (rawMine as CardString)
