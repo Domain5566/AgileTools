@@ -1,0 +1,20 @@
+{
+  "name": "agiletools",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "apps/server"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:web": "npm run dev -w web",
+    "dev:server": "npm run start:dev -w server",
+    "build:web": "npm run build -w web",
+    "build:server": "npm run build -w server",
+    "build": "npm run build:server && npm run build:web",
+    "test:server": "npm test -w server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
