@@ -8,7 +8,4 @@ node_modules/
 dist/
 **/dist/
 
-# Cursor workspace state (local only)
-.cursor/
-**/.cursor/
 
