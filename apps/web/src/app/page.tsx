@@ -74,12 +74,27 @@ function persistRoomSession(roomCode: string, displayName: string): void {
   }
 }
 
+/** 未設 NEXT_PUBLIC_WS_ORIGIN 時，依「目前頁面的埠」推斷後端埠（與 docker 9003/9004、dev 3003/3004 對齊）。 */
+function getDefaultWsPort(): number {
+  const fromPort = process.env.NEXT_PUBLIC_WS_PORT?.trim();
+  if (fromPort) {
+    const n = Number.parseInt(fromPort, 10);
+    if (Number.isFinite(n) && n > 0 && n < 65536) return n;
+  }
+  if (typeof window === "undefined") return 3004;
+  const p = window.location.port;
+  if (p === "9003") return 9004;
+  if (p === "3003") return 3004;
+  return 3004;
+}
+
 function getWsOrigin(): string {
   const fromEnv = process.env.NEXT_PUBLIC_WS_ORIGIN;
   if (typeof window === "undefined") return "http://localhost:3004";
   const proto = window.location.protocol === "https:" ? "https:" : "http:";
   const host = window.location.hostname;
-  const derived = `${proto}//${host}:3004`;
+  const port = getDefaultWsPort();
+  const derived = `${proto}//${host}:${port}`;
 
   if (fromEnv && fromEnv.trim()) {
     const trimmed = fromEnv.trim();

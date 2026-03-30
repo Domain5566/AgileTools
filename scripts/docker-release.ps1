@@ -8,8 +8,8 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 $env:AGILETOOLS_VERSION = $version
-$server = "ghcr.io/domain5566/agiletools-server"
-$web = "ghcr.io/domain5566/agiletools-web"
+$server = "yuminggood/agiletools-server"
+$web = "yuminggood/agiletools-web"
 
 Write-Host "Building $server`:$version and $web`:$version ..."
 docker compose build

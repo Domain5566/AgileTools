@@ -64,6 +64,12 @@ Windows 注意：
 
 ## Release Notes
 
+### 1.0.3
+
+- **WebSocket / 區網**：前端未設 `NEXT_PUBLIC_WS_ORIGIN` 時，依頁面埠推斷後端：**3003→3004**、**9003→9004**；可選 `NEXT_PUBLIC_WS_PORT` 覆寫。
+- **後端**：預設 **`HOST=0.0.0.0`** 監聽，同網段可用主機 IP 連線（可用 `HOST` 覆寫）。
+- **Dockerfile**：移除 `# syntax=docker/dockerfile:1`，避免本機錯誤的 Docker Hub 登入導致建置 401。
+
 ### 1.0.2
 
 - **CI / Docker Hub**：於 GitHub **Release（published）** 時由 Actions 自動建置並推送映像（見 `.github/workflows/docker-publish-on-release.yml`）；需在 repo **Actions secrets** 設定 `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`。映像：`<username>/agiletools-server`、`<username>/agiletools-web`；標籤為 Release 的 tag 名稱，且非 prerelease 時另推 `latest`。

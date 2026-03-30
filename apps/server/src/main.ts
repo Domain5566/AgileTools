@@ -12,9 +12,10 @@ async function bootstrap() {
     credentials: true,
   });
   const port = Number(process.env.PORT ?? 3004);
-  await app.listen(port);
+  const listenHost = process.env.HOST?.trim() || '0.0.0.0';
+  await app.listen(port, listenHost);
   Logger.log(
-    `後端已就緒 → http://localhost:${port}（WebSocket namespace /planning-poker）`,
+    `後端已就緒 port=${port} host=${listenHost}（WebSocket /planning-poker）`,
     'Bootstrap',
   );
 }
