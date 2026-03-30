@@ -1,0 +1,29 @@
+# 本機／測試用：只用 Dockerfile 建置，不設定 Docker Hub 映像名稱，不會去拉 yuminggood/* 等遠端映像。
+# 仍會在建置時從 Docker Hub 拉 base（如 node:22-alpine）；若要完全離線需已有 base 快取或使用私有 registry。
+#
+# 使用方式（在 repo 根目錄）：
+#   docker compose -f docker-compose.local.yml up --build
+#   docker compose -f docker-compose.local.yml down
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    environment:
+      - PORT=3004
+      - WEB_ORIGIN=
+    ports:
+      - "3004:3004"
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args: {}
+    environment: 
+     - PORT=3003
+    ports:
+      - "3003:3003"
+    depends_on:
+      - server

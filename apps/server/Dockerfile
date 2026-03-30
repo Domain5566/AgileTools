@@ -27,7 +27,5 @@ COPY --from=build /app/apps/server/package.json ./package.json
 COPY --from=deps /app/node_modules ./node_modules
 
 EXPOSE 9004
-ENV PORT=9004
-
 CMD ["node", "dist/main"]
 

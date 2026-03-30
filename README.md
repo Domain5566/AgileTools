@@ -64,6 +64,10 @@ Windows 注意：
 
 ## Release Notes
 
+### 1.0.4
+
+- **Docker Compose（本機 / 正式）**：`apps/server` / `apps/web` 容器不再在 Dockerfile 內硬編 `PORT`，而是完全由環境變數與 `docker compose` 的 `environment` / `ports` 控制；`docker-compose.yml` 用 9003/9004，`docker-compose.local.yml` 用 3003/3004（主機埠可自由調整）。
+
 ### 1.0.3
 
 - **WebSocket / 區網**：前端未設 `NEXT_PUBLIC_WS_ORIGIN` 時，依頁面埠推斷後端：**3003→3004**、**9003→9004**；可選 `NEXT_PUBLIC_WS_PORT` 覆寫。

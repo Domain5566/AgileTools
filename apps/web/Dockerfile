@@ -26,7 +26,5 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/apps/web ./apps/web
 
 EXPOSE 9003
-ENV PORT=9003
-
 CMD ["npm", "run", "start", "-w", "web"]
 
