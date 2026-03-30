@@ -1,5 +1,8 @@
+# 映像標籤：預設 1.0.2，發布前可設 AGILETOOLS_VERSION=1.0.3
+# 推送前請先：docker login ghcr.io（需 GitHub PAT，權限 write:packages）
 services:
   server:
+    image: ghcr.io/domain5566/agiletools-server:${AGILETOOLS_VERSION:-1.0.2}
     build:
       context: .
       dockerfile: apps/server/Dockerfile
@@ -12,6 +15,7 @@ services:
       - "9004:9004"
 
   web:
+    image: ghcr.io/domain5566/agiletools-web:${AGILETOOLS_VERSION:-1.0.2}
     build:
       context: .
       dockerfile: apps/web/Dockerfile

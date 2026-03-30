@@ -61,3 +61,19 @@ Windows 注意：
 
 - 需要可用的 `make`（例如 Git Bash / WSL / MSYS2 / GnuWin32）。
 - `make clean` 會呼叫 `rm -rf`，建議在 Git Bash / WSL 下使用。
+
+## Release Notes
+
+### 1.0.2
+
+- **CI / Docker Hub**：於 GitHub **Release（published）** 時由 Actions 自動建置並推送映像（見 `.github/workflows/docker-publish-on-release.yml`）；需在 repo **Actions secrets** 設定 `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`。映像：`<username>/agiletools-server`、`<username>/agiletools-web`；標籤為 Release 的 tag 名稱，且非 prerelease 時另推 `latest`。
+- **Docker Compose**：預設映像前綴仍為 GHCR `ghcr.io/domain5566/...`（可改為你的 Docker Hub 名稱）；本機亦可使用 `scripts/docker-release.ps1` 手動推 GHCR。
+- 本機 `make dev` 仍為 **3003 / 3004**；`docker compose` 對外仍為 **9003 / 9004**。
+
+### 1.0.1
+
+- WeAgile 品牌 Logo 與配色、本機開發埠改為 3003/3004、OpenSpec `logo-theme-refresh` 與 `web-branding-theme` 規格。
+
+### 1.0.0
+
+- Planning Poker 重連／房間生命週期、首版 GitHub Release。
